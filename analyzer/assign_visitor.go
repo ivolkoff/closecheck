@@ -139,24 +139,22 @@ func (av *AssignVisitor) traverse(stmts []ast.Stmt) bool {
 	posListToClose := []*posToClose{}
 
 	for _, stmt := range stmts {
-		if len(posListToClose) == 0 {
-			switch castedStmt := stmt.(type) {
-			case *ast.ExprStmt:
-				call, ok := castedStmt.X.(*ast.CallExpr)
-				if ok && av.callReturnsCloser(call) {
-					av.pass.Reportf(call.Pos(), "return value won't be closed because it wasn't assigned") // FIXME: improve message
-					return false
-				}
-			case *ast.DeferStmt:
-				if av.callReturnsCloser(castedStmt.Call) {
-					av.pass.Reportf(castedStmt.Call.Pos(), "return value won't be closed because it's on defer statement") // FIXME: improve message
-					return false
-				}
-			case *ast.GoStmt:
-				if av.callReturnsCloser(castedStmt.Call) {
-					av.pass.Reportf(castedStmt.Call.Pos(), "return value won't be closed because it's on go statement") // FIXME: improve message
-					return false
-				}
+		// Check for unassigned calls that return closers
+		switch castedStmt := stmt.(type) {
+		case *ast.ExprStmt:
+			call, ok := castedStmt.X.(*ast.CallExpr)
+			if ok && av.callReturnsCloser(call) {
+				av.pass.Reportf(call.Pos(), "return value won't be closed because it wasn't assigned") // FIXME: improve message
+			}
+		case *ast.DeferStmt:
+			if av.callReturnsCloser(castedStmt.Call) {
+				av.pass.Reportf(castedStmt.Call.Pos(), "return value won't be closed because it's on defer statement") // FIXME: improve message
+				return false
+			}
+		case *ast.GoStmt:
+			if av.callReturnsCloser(castedStmt.Call) {
+				av.pass.Reportf(castedStmt.Call.Pos(), "return value won't be closed because it's on go statement") // FIXME: improve message
+				return false
 			}
 		}
 
@@ -182,11 +180,16 @@ func (av *AssignVisitor) traverse(stmts []ast.Stmt) bool {
 		}
 	}
 
+	hasErrors := false
 	for _, idToClose := range posListToClose {
 		if !idToClose.wasClosedOrReturned {
 			av.pass.Reportf(idToClose.parent.Pos(), "%s (%s) was not closed", idToClose.name, idToClose.typeName)
-			return false
+			hasErrors = true
 		}
+	}
+
+	if hasErrors {
+		return false
 	}
 
 	return true
@@ -208,14 +211,29 @@ func (av *AssignVisitor) hasGlobalCloserInAssignment(lhs []ast.Expr) bool {
 }
 
 func (av *AssignVisitor) returnsOrClosesIDOnExpression(idToClose posToClose, expr ast.Expr) bool {
+	// First check if the expression contains the identifier we're tracking
+	if !av.isPosInExpression(idToClose.pos, expr) {
+		return false
+	}
+
+	// If it contains the identifier, check if it's being properly handled
 	switch cExpr := expr.(type) {
 	case *ast.Ident:
 		return av.getKnownCloserFromIdent(cExpr) != nil
 	case *ast.FuncLit:
 		return av.traverse(cExpr.Body.List)
 	case *ast.CallExpr:
+		// Check if this is a direct Close() call on our identifier
+		if sel, ok := cExpr.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Close" {
+			if av.isPosInExpression(idToClose.pos, sel.X) {
+				return true
+			}
+		}
+
 		return av.callsToKnownCloser(idToClose.pos, cExpr)
 	case *ast.SelectorExpr:
+		// This case handles expressions like res7.Body (not function calls)
+		// A selector expression alone doesn't close anything
 		return av.getKnownCloserFromSelector(cExpr) != nil
 	}
 
@@ -246,11 +264,6 @@ func (av *AssignVisitor) returnsOrClosesID(idToClose posToClose, stmt ast.Stmt) 
 	case *ast.ExprStmt:
 		call, ok := castedStmt.X.(*ast.CallExpr)
 		if !ok {
-			return false
-		}
-
-		if av.callReturnsCloser(call) {
-			av.pass.Reportf(call.Pos(), "return value won't be closed because it wasn't assigned") // FIXME: improve message
 			return false
 		}
 
@@ -374,7 +387,11 @@ func (av *AssignVisitor) handleAssignment(lhs []ast.Expr, rhs ast.Expr) []*posTo
 }
 
 func (av *AssignVisitor) callReturnsCloser(call *ast.CallExpr) bool {
-	for _, returnVar := range av.returnsThatAreClosers(call) {
+	returnVars := av.returnsThatAreClosers(call)
+	av.debug(call, "callReturnsCloser: checking %d return vars", len(returnVars))
+	for i, returnVar := range returnVars {
+		av.debug(call, "Return var %d: needsClosing=%t, typeName=%s, fields=%d",
+			i, returnVar.needsClosing, returnVar.typeName, len(returnVar.fields))
 		if returnVar.needsClosing {
 			return true
 		}
@@ -436,17 +453,8 @@ func (av *AssignVisitor) getKnownCloserFromSelector(sel *ast.SelectorExpr) *ioCl
 	var knownCloser *ioCloserFunc
 
 	av.visitSelectors(sel, func(id *ast.Ident) bool {
-		if id.Name == "Close" { // TODO: check that reciever is a io.Closer
-			knownCloser = &ioCloserFunc{
-				isCloser: true,
-			} // this is a hack to mark "Close" as a known closer
-
-			return false
-		}
-
 		if fn := av.getKnownCloserFromIdent(id); fn != nil {
 			knownCloser = fn
-
 			return false
 		}
 
@@ -492,6 +500,10 @@ func (av *AssignVisitor) callsToKnownCloser(pos token.Pos, call *ast.CallExpr) b
 	case *ast.Ident:
 		return av.getKnownCloserFromIdent(castedFun) != nil
 	case *ast.SelectorExpr:
+		// Check if this is a Close() method call on the identifier we're tracking
+		if castedFun.Sel.Name == "Close" && av.isPosInExpression(pos, castedFun.X) {
+			return true
+		}
 		return av.getKnownCloserFromSelector(castedFun) != nil
 	case *ast.FuncLit:
 		return av.traverse(castedFun.Body.List)

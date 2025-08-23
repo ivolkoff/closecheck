@@ -130,26 +130,31 @@ func (pp *FunctionVisitor) findFunctionsThatReceiveAnIOCloser() map[*types.Func]
 		}
 	}
 
-	for _, rcv := range pp.receivers {
-		for _, id := range rcv.argNames {
-			if pp.traverse(id, rcv.fdecl.Body.List) {
-				rcv.isCloser = true
+	// Run multiple passes to handle transitive closure relationships
+	maxPasses := 10 // Prevent infinite loops
+	for pass := 0; pass < maxPasses; pass++ {
+		changesMade := false
+
+		for _, rcv := range pp.receivers {
+			if rcv.isCloser {
+				continue // Already determined to be a closer
+			}
+
+			for _, id := range rcv.argNames {
+				if pp.traverse(id, rcv.fdecl.Body.List) {
+					rcv.isCloser = true
+					changesMade = true
+					break
+				}
 			}
 		}
 
-		if showCloserFunctionsFound {
-			fmt.Println("found closer function:", rcv.obj.FullName(), "closer:", rcv.isCloser, "pos:", rcv.obj.Pos())
+		if !changesMade {
+			break // No more changes, we're done
 		}
 	}
 
-	// TODO: optimize this, no need to loop again over all receivers
 	for _, rcv := range pp.receivers {
-		for _, id := range rcv.argNames {
-			if pp.traverse(id, rcv.fdecl.Body.List) {
-				rcv.isCloser = true
-			}
-		}
-
 		if showCloserFunctionsFound {
 			fmt.Println("found closer function:", rcv.obj.FullName(), "closer:", rcv.isCloser, "pos:", rcv.obj.Pos())
 		}
@@ -314,7 +319,15 @@ func (pp *FunctionVisitor) closesIdentOnExpression(id *ast.Ident, expr ast.Expr)
 		}
 
 		if cl := pp.getKnownCloser(castedExpr); cl != nil && cl.isCloser {
-			return true
+			// Check if the identifier is passed as an argument that will be closed
+			for i, arg := range castedExpr.Args {
+				if pp.isPosInExpression(id.Pos(), arg) {
+					// Check if this argument position corresponds to a closer parameter
+					if i < len(cl.argsThatAreClosers) && cl.argsThatAreClosers[i] {
+						return true
+					}
+				}
+			}
 		}
 
 	case *ast.SelectorExpr:
