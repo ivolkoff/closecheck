@@ -1,5 +1,10 @@
-module github.com/dcu/closecheck
+module github.com/ivolkoff/closecheck
 
-go 1.14
+go 1.24
 
-require golang.org/x/tools v0.19.0
+require golang.org/x/tools v0.36.0
+
+require (
+	golang.org/x/mod v0.27.0 // indirect
+	golang.org/x/sync v0.16.0 // indirect
+)

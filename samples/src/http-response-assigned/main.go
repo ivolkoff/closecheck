@@ -18,7 +18,7 @@ func doReq() *http.Response {
 type closer struct {
 }
 
-func (c closer) closeBody(bodyToBeClosed io.Closer) { // want closeBody:"is not closer"
+func (c closer) closeBody(bodyToBeClosed io.Closer) { // want closeBody:"is closer"
 	c.closeBodyWithContext(context.Background(), bodyToBeClosed)
 }
 
@@ -64,4 +64,13 @@ func main() {
 
 	res6 := doReq()
 	aCloser.doNothing(res6.Body.Close())
+
+	res7 := doReq() // want `res7.Body \(io.ReadCloser\) was not closed`
+	aCloser.doNothing(res7.Body.Close)
+
+	res8 := doReq() // want `res8.Body \(io.ReadCloser\) was not closed`
+	aCloser.doNothing(res8.Body)
+
+	res9 := doReq() // want `res9.Body \(io.ReadCloser\) was not closed`
+	aCloser.doNothing(res9)
 }
