@@ -1,11 +1,11 @@
 package analyzer
 
 import (
-	"go/types"
+    "go/types"
 
-	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/inspect"
-	"golang.org/x/tools/go/packages"
+    "golang.org/x/tools/go/analysis"
+    "golang.org/x/tools/go/analysis/passes/inspect"
+    "golang.org/x/tools/go/packages"
 )
 
 var (
@@ -22,11 +22,6 @@ var (
 	printStatementsMode bool
 )
 
-type isCloser struct {
-}
-
-func (c *isCloser) AFact() {}
-
 func run(pass *analysis.Pass) (interface{}, error) {
 	fVisitor := &FunctionVisitor{pass: pass}
 	funcs := fVisitor.findFunctionsThatReceiveAnIOCloser()
@@ -39,11 +34,16 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 func init() {
 	Analyzer.Flags.BoolVar(&printStatementsMode, "print-statements", false, "print program trace")
+	Analyzer.Flags.BoolVar(&enableFunctionDebugger, "enable-function-debugger", false, "enable function debugger")
+	Analyzer.Flags.BoolVar(&showCloserFunctionsFound, "show-closer-functions-found", false, "show closer functions found")
 }
 
 // init finds the io.Closer interface
 func init() {
-	cfg := &packages.Config{Mode: packages.NeedDeps | packages.NeedTypes, Tests: false}
+	cfg := &packages.Config{
+		Mode:  packages.NeedDeps | packages.NeedTypes,
+		Tests: false,
+	}
 
 	pkgs, err := packages.Load(cfg, "io")
 	if err != nil {
@@ -58,4 +58,9 @@ func init() {
 	if closerType == nil {
 		panic("io.Closer not found")
 	}
+}
+
+// isCloserType checks if a type implements io.Closer
+func isCloserType(t types.Type) bool {
+    return types.Implements(t, closerType)
 }

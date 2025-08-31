@@ -10,6 +10,30 @@ import (
 func Test(t *testing.T) {
 	path, _ := filepath.Abs("../samples")
 
-	//analysistest.Run(t, path, Analyzer, "http-response-external-closer")
-	analysistest.Run(t, path, Analyzer, "http-response-ignored", "http-response-not-assigned", "multi-assign", "http-response-on-go-statement", "http-response-on-defer-statement", "http-response-nopcloser", "global-var") // FIXME: "http-response-assigned",
+	testCases := []struct {
+		Name string
+	}{
+		{"global-var"},
+		{"graceful-shutdown-close"},
+		{"graceful-shutdown-close-v3"},
+		{"graceful-shutdown-noclose"},
+		{"graceful-shutdown-noclose-v3"},
+		{"http-response-assigned"},
+		{"http-response-external-closer"},
+		{"http-response-ignored"},
+		{"http-response-nopcloser"},
+		{"http-response-not-assigned"},
+		{"http-response-on-defer-statement"},
+		{"http-response-on-go-statement"},
+		{"http-response-return"},
+		{"multi-assign"},
+		{"redigo"},
+		{"struct-field"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.Name, func(t *testing.T) {
+			analysistest.Run(t, path, Analyzer, testCase.Name)
+		})
+	}
 }

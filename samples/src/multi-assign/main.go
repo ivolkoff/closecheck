@@ -1,5 +1,9 @@
 package main
 
+import "time"
+
+const PeriodUpdate = 2
+
 type customCloser struct {
 }
 
@@ -14,4 +18,8 @@ func closer() *customCloser {
 
 func main() {
 	_, _ = 1, closer() // want `_ \(\*multi-assign.customCloser\) was not closed`
+
+	updateCantCheckTime := time.Now().Add(-time.Hour * 24 * PeriodUpdate).Truncate(time.Second)
+
+	_ = updateCantCheckTime
 }

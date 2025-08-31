@@ -92,11 +92,11 @@ func (pp *FunctionVisitor) findFunctionsThatReceiveAnIOCloser() map[*types.Func]
 					continue
 				}
 
-				//if fn.Name() != "CloseWithDefer" && fn.Name() != "doClose" {
-				//continue
-				//}
-
-				//_ = ast.Print(pp.pass.Fset, decl)
+				// Skip constructor-like functions that store closers rather than close them
+				// These typically create repositories/services and store dependencies
+				if pp.isConstructorFunction(cDecl, fn) {
+					continue
+				}
 
 				sig := fn.Type().(*types.Signature)
 				params := sig.Params()
@@ -115,6 +115,11 @@ func (pp *FunctionVisitor) findFunctionsThatReceiveAnIOCloser() map[*types.Func]
 					if isCloserReceiver(param.Type()) {
 						receivesCloser = true
 						argsThatAreClosers[i] = true
+
+						// Debug parameter type detection
+						// if strings.Contains(fn.FullName(), "Get") {
+						//	fmt.Printf("DEBUG: Function %s param %d type %s detected as closer\n", fn.FullName(), i, param.Type().String())
+						// }
 					}
 				}
 
@@ -130,29 +135,39 @@ func (pp *FunctionVisitor) findFunctionsThatReceiveAnIOCloser() map[*types.Func]
 		}
 	}
 
-	for _, rcv := range pp.receivers {
-		for _, id := range rcv.argNames {
-			if pp.traverse(id, rcv.fdecl.Body.List) {
-				rcv.isCloser = true
+	// Run multiple passes to handle transitive closure relationships
+	maxPasses := 10 // Prevent infinite loops
+	for pass := 0; pass < maxPasses; pass++ {
+		changesMade := false
+
+		for _, rcv := range pp.receivers {
+			if rcv.isCloser {
+				continue // Already determined to be a closer
+			}
+
+			for _, id := range rcv.argNames {
+				if pp.traverse(id, rcv.fdecl.Body.List) {
+					rcv.isCloser = true
+					changesMade = true
+					break
+				}
 			}
 		}
 
-		if showCloserFunctionsFound {
-			fmt.Println("found closer function:", rcv.obj.FullName(), "closer:", rcv.isCloser, "pos:", rcv.obj.Pos())
+		if !changesMade {
+			break // No more changes, we're done
 		}
 	}
 
-	// TODO: optimize this, no need to loop again over all receivers
 	for _, rcv := range pp.receivers {
-		for _, id := range rcv.argNames {
-			if pp.traverse(id, rcv.fdecl.Body.List) {
-				rcv.isCloser = true
-			}
-		}
-
 		if showCloserFunctionsFound {
 			fmt.Println("found closer function:", rcv.obj.FullName(), "closer:", rcv.isCloser, "pos:", rcv.obj.Pos())
 		}
+
+		// Debug Redis function detection
+		// if strings.Contains(rcv.obj.FullName(), "Get") {
+		//	fmt.Printf("DEBUG: Redis function %s isCloser=%t\n", rcv.obj.FullName(), rcv.isCloser)
+		// }
 
 		pp.pass.ExportObjectFact(rcv.obj, rcv)
 	}
@@ -160,14 +175,66 @@ func (pp *FunctionVisitor) findFunctionsThatReceiveAnIOCloser() map[*types.Func]
 	return pp.receivers
 }
 
+// looksLikeCloserClose verifies that a method signature EXACTLY matches io.Closer.Close(): func() error
+func looksLikeCloserClose(sig *types.Signature) bool {
+	// Must have no parameters
+	if sig.Params().Len() != 0 {
+		return false
+	}
+
+	// Must return exactly one result
+	results := sig.Results()
+	if results.Len() != 1 {
+		return false
+	}
+
+	// The result must be exactly "error"
+	resultType := results.At(0).Type()
+	if resultType.String() == "error" {
+		return true
+	}
+	return false
+}
+
 func isCloserReceiver(t types.Type) bool {
-	if types.Implements(t, closerType) {
+	// Debug Context detection
+	// if strings.Contains(t.String(), "Context") {
+	//	fmt.Printf("DEBUG: Analyzing type %s\n", t.String())
+	// }
+
+	if isCloserType(t) {
+		// if strings.Contains(t.String(), "Context") {
+		//	fmt.Printf("DEBUG: Type %s detected as isCloserType\n", t.String())
+		// }
 		return true
 	}
 
+	// Do not use name/signature heuristics; only io.Closer interface or structs with io.Closer fields
+
+	// Check for named types (which could be generic)
+	if named, ok := t.(*types.Named); ok {
+		result := isCloserReceiverStruct(named.Underlying())
+		// if result && strings.Contains(t.String(), "Context") {
+		//	fmt.Printf("DEBUG: Type %s detected as closerReceiverStruct via named\n", t.String())
+		// }
+		return result
+	}
+
 	// special case: a struct containing a io.Closer fields that implements io.Closer, like http.Response.Body
-	ptr, ok := t.Underlying().(*types.Pointer)
+	result := isCloserReceiverStruct(t)
+	// if result && strings.Contains(t.String(), "Context") {
+	//	fmt.Printf("DEBUG: Type %s detected as closerReceiverStruct direct\n", t.String())
+	// }
+	return result
+}
+
+func isCloserReceiverStruct(t types.Type) bool {
+	ptr, ok := t.(*types.Pointer)
 	if !ok {
+		// Also check non-pointer structs
+		if str, ok := t.(*types.Struct); ok {
+			return hasCloserFields(str)
+		}
 		return false
 	}
 
@@ -176,16 +243,25 @@ func isCloserReceiver(t types.Type) bool {
 		return false
 	}
 
+	return hasCloserFields(str)
+}
+
+func hasCloserFields(str *types.Struct) bool {
 	for i := 0; i < str.NumFields(); i++ {
 		v := str.Field(i)
 		fieldName := v.Name()
 
-		// TODO: don't ignore unexported fields if the struct is in the current package
-		if types.Implements(v.Type(), closerType) && unicode.IsUpper([]rune(fieldName)[0]) {
+		// Check exported fields
+		if isCloserType(v.Type()) && unicode.IsUpper([]rune(fieldName)[0]) {
+			return true
+		}
+
+		// Also check unexported fields - this is important for generic types like Asset[T]
+		// where the closer might be stored in an unexported field
+		if isCloserType(v.Type()) {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -195,7 +271,7 @@ func (pp *FunctionVisitor) traverse(id *ast.Ident, stmts []ast.Stmt) bool {
 		case *ast.IfStmt:
 			pp.debug(castedStmt, "found if stmt")
 
-			if pp.traverse(id, []ast.Stmt{castedStmt.Init}) {
+			if castedStmt.Init != nil && pp.traverse(id, []ast.Stmt{castedStmt.Init}) {
 				return true
 			}
 
@@ -280,6 +356,167 @@ func (pp *FunctionVisitor) getKnownCloserFromIdent(id *ast.Ident) *ioCloserFunc 
 	return fn
 }
 
+// isConstructorFunction determines if a function is a constructor that stores closers
+// rather than closes them. Constructors typically:
+// 1. Return a struct/pointer to struct (not primitive/interface)
+// 2. Store parameters in the returned struct fields
+// 3. Don't call Close() on their parameters
+func (pp *FunctionVisitor) isConstructorFunction(fdecl *ast.FuncDecl, fn *types.Func) bool {
+	sig := fn.Type().(*types.Signature)
+	results := sig.Results()
+
+	// Must return exactly one value
+	if results.Len() != 1 {
+		return false
+	}
+
+	returnType := results.At(0).Type()
+
+	// Check if return type is a struct or pointer to struct
+	if !pp.returnsStructType(returnType) {
+		return false
+	}
+
+	// Check if function stores parameters in struct fields (constructor pattern)
+	// and doesn't call Close() on parameters
+	return pp.storesParametersInStruct(fdecl) && !pp.callsCloseOnParameters(fdecl)
+}
+
+// returnsStructType checks if the type is a struct or pointer to struct
+func (pp *FunctionVisitor) returnsStructType(t types.Type) bool {
+	switch underlying := t.Underlying().(type) {
+	case *types.Struct:
+		return true
+	case *types.Pointer:
+		_, isStruct := underlying.Elem().Underlying().(*types.Struct)
+		return isStruct
+	}
+	return false
+}
+
+// storesParametersInStruct checks if function assigns parameters to struct fields
+func (pp *FunctionVisitor) storesParametersInStruct(fdecl *ast.FuncDecl) bool {
+	if fdecl.Body == nil {
+		return false
+	}
+
+	// Look for patterns like: return &Struct{field: param}
+	for _, stmt := range fdecl.Body.List {
+		if retStmt, ok := stmt.(*ast.ReturnStmt); ok {
+			for _, result := range retStmt.Results {
+				if pp.isStructLiteralWithFieldAssignment(result) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isStructLiteralWithFieldAssignment checks for &Struct{field: value} or Struct{field: value}
+func (pp *FunctionVisitor) isStructLiteralWithFieldAssignment(expr ast.Expr) bool {
+	// Handle &Struct{...}
+	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+		expr = unary.X
+	}
+
+	// Check for Struct{field: value}
+	if compLit, ok := expr.(*ast.CompositeLit); ok {
+		// Must have field assignments (not just positional)
+		for _, elt := range compLit.Elts {
+			if _, ok := elt.(*ast.KeyValueExpr); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// callsCloseOnParameters checks if function calls Close() on any of its parameters
+func (pp *FunctionVisitor) callsCloseOnParameters(fdecl *ast.FuncDecl) bool {
+	if fdecl.Body == nil {
+		return false
+	}
+
+	// Get parameter names
+	paramNames := make(map[string]bool)
+	if fdecl.Type.Params != nil {
+		for _, field := range fdecl.Type.Params.List {
+			for _, name := range field.Names {
+				paramNames[name.Name] = true
+			}
+		}
+	}
+
+	// Check if any statement calls Close() on parameters
+	return pp.hasCloseCallOnParams(fdecl.Body.List, paramNames)
+}
+
+// hasCloseCallOnParams recursively checks for Close() calls on parameters
+func (pp *FunctionVisitor) hasCloseCallOnParams(stmts []ast.Stmt, paramNames map[string]bool) bool {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case *ast.ExprStmt:
+			if pp.isCloseCallOnParam(s.X, paramNames) {
+				return true
+			}
+		case *ast.DeferStmt:
+			if pp.isCloseCallOnParam(s.Call, paramNames) {
+				return true
+			}
+		case *ast.IfStmt:
+			if pp.hasCloseCallOnParams(s.Body.List, paramNames) {
+				return true
+			}
+		case *ast.BlockStmt:
+			if pp.hasCloseCallOnParams(s.List, paramNames) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isCloseCallOnParam checks if expression is a method call on a parameter that looks like cleanup
+func (pp *FunctionVisitor) isCloseCallOnParam(expr ast.Expr, paramNames map[string]bool) bool {
+	if call, ok := expr.(*ast.CallExpr); ok {
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if ident, ok := sel.X.(*ast.Ident); ok && paramNames[ident.Name] {
+				// Check if this method call has a cleanup-like signature
+				return pp.isMethodCallWithCleanupSignature(call)
+			}
+		}
+	}
+	return false
+}
+
+// isMethodCallWithCleanupSignature checks if call is EXACTLY io.Closer.Close() error
+func (pp *FunctionVisitor) isMethodCallWithCleanupSignature(call *ast.CallExpr) bool {
+    sel, ok := call.Fun.(*ast.SelectorExpr)
+    if !ok || sel.Sel == nil {
+        return false
+    }
+    
+    // Method MUST be named exactly "Close"
+    if sel.Sel.Name != "Close" {
+        return false
+    }
+    
+    if fn, ok := typeutil.Callee(pp.pass.TypesInfo, call).(*types.Func); ok && fn != nil {
+        if fn.Name() != "Close" {
+            return false
+        }
+        if sig, ok := fn.Type().(*types.Signature); ok {
+            // Receiver MUST implement io.Closer interface
+            if recvInfo, ok := pp.pass.TypesInfo.Types[sel.X]; ok && isCloserType(recvInfo.Type) {
+                // Signature MUST be exactly func() error
+                return looksLikeCloserClose(sig)
+            }
+        }
+    }
+    return false
+}
+
 func (pp *FunctionVisitor) getKnownCloserFromSelector(sel *ast.SelectorExpr) *ioCloserFunc {
 	var knownCloser *ioCloserFunc
 
@@ -309,18 +546,30 @@ func (pp *FunctionVisitor) closesIdentOnAnyExpression(id *ast.Ident, exprs []ast
 func (pp *FunctionVisitor) closesIdentOnExpression(id *ast.Ident, expr ast.Expr) bool {
 	switch castedExpr := expr.(type) { // TODO: funclit
 	case *ast.CallExpr:
-		if castedExpr.Fun != nil && pp.closesIdentOnExpression(id, castedExpr.Fun) {
-			return true
+		// Check if this is a method call on our identifier (e.g., id.Method())
+		if sel, ok := castedExpr.Fun.(*ast.SelectorExpr); ok {
+			if pp.isPosInExpression(id.Pos(), sel.X) {
+				// Only treat as cleanup if it's io.Closer.Close()
+				return pp.isMethodCallWithCleanupSignature(castedExpr)
+			}
 		}
 
 		if cl := pp.getKnownCloser(castedExpr); cl != nil && cl.isCloser {
-			return true
+			// Check if the identifier is passed as an argument that will be closed
+			for i, arg := range castedExpr.Args {
+				if pp.isPosInExpression(id.Pos(), arg) {
+					// Check if this argument position corresponds to a closer parameter
+					if i < len(cl.argsThatAreClosers) && cl.argsThatAreClosers[i] {
+						return true
+					}
+				}
+			}
 		}
 
 	case *ast.SelectorExpr:
-		if pp.isPosInExpression(id.Pos(), castedExpr.X) && castedExpr.Sel.Name == "Close" {
-			return true
-		}
+		// This case handles when selector expression is passed recursively
+		// but we want to check method calls, not just selectors
+		return false
 	}
 
 	return false
