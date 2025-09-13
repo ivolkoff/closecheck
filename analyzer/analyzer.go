@@ -1,11 +1,11 @@
 package analyzer
 
 import (
+	"go/token"
 	"go/types"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
-	"golang.org/x/tools/go/packages"
 )
 
 var (
@@ -15,17 +15,12 @@ var (
 		Doc:       "check that any io.Closer in return a value is closed",
 		Run:       run,
 		Requires:  []*analysis.Analyzer{inspect.Analyzer},
-		FactTypes: []analysis.Fact{new(ioCloserFunc)},
+		FactTypes: []analysis.Fact{new(ioCloserFunc), new(containerMethodFact)},
 	}
 
 	closerType          *types.Interface
 	printStatementsMode bool
 )
-
-type isCloser struct {
-}
-
-func (c *isCloser) AFact() {}
 
 func run(pass *analysis.Pass) (interface{}, error) {
 	fVisitor := &FunctionVisitor{pass: pass}
@@ -39,23 +34,26 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 func init() {
 	Analyzer.Flags.BoolVar(&printStatementsMode, "print-statements", false, "print program trace")
+	Analyzer.Flags.BoolVar(&enableFunctionDebugger, "enable-function-debugger", false, "enable function debugger")
+	Analyzer.Flags.BoolVar(&showCloserFunctionsFound, "show-closer-functions-found", false, "show closer functions found")
 }
 
-// init finds the io.Closer interface
+// init constructs the io.Closer interface type programmatically to avoid loading stdlib packages
 func init() {
-	cfg := &packages.Config{Mode: packages.NeedDeps | packages.NeedTypes, Tests: false}
+	// error type from universe
+	errT := types.Universe.Lookup("error").Type()
+	// func() error
+	params := types.NewTuple()
+	results := types.NewTuple(types.NewVar(token.NoPos, nil, "", errT))
+	sig := types.NewSignatureType(nil, nil, nil, params, results, false)
+	// method Close
+	closeFn := types.NewFunc(token.NoPos, nil, "Close", sig)
+	// interface { Close() error }
+	closerType = types.NewInterfaceType([]*types.Func{closeFn}, nil)
+	closerType.Complete()
+}
 
-	pkgs, err := packages.Load(cfg, "io")
-	if err != nil {
-		panic(err)
-	}
-
-	if len(pkgs) != 1 {
-		panic("couldn't load io package")
-	}
-
-	closerType = pkgs[0].Types.Scope().Lookup("Closer").Type().Underlying().(*types.Interface)
-	if closerType == nil {
-		panic("io.Closer not found")
-	}
+// isCloserType checks if a type implements io.Closer
+func isCloserType(t types.Type) bool {
+	return types.Implements(t, closerType)
 }
