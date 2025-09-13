@@ -18,7 +18,7 @@ func doReq() *http.Response {
 type closer struct {
 }
 
-func (c closer) closeBody(bodyToBeClosed io.Closer) { // want closeBody:"is not closer"
+func (c closer) closeBody(bodyToBeClosed io.Closer) { // want closeBody:"is closer"
 	c.closeBodyWithContext(context.Background(), bodyToBeClosed)
 }
 

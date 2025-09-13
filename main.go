@@ -16,7 +16,7 @@ limitations under the License.
 package main
 
 import (
-	"github.com/dcu/closecheck/analyzer"
+	"github.com/ivolkoff/closecheck/analyzer"
 	"golang.org/x/tools/go/analysis/singlechecker"
 )
 
